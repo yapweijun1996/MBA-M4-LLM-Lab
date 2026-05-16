@@ -308,14 +308,92 @@ lab project is built around.
 | `GET /` | Required (or loopback) | Chat UI (HTML) |
 | `GET /v1/models` | Required (or loopback) | OpenAI-format model list |
 | `POST /v1/chat/completions` | Required (or loopback) | OpenAI-format completion |
+| `POST /v1/messages` | Required (or loopback) | **Anthropic-format completion** (Messages API) |
 | `GET /health` | Required (or loopback) | Health JSON |
+
+The same server speaks **both OpenAI and Anthropic protocols** on the same
+port — pick whichever endpoint your client library expects. See §9 for how
+to point Anthropic-ecosystem tools (Claude Code, Anthropic SDK) at this server.
 
 Note: even `/health` enforces auth when `--api-key` is set. This means
 "is the server up?" probes from external monitoring tools need the key.
 
 ---
 
-## 9. Quick reference
+## 9. Anthropic / Claude Code integration
+
+The MTPLX server speaks the Anthropic Messages API at `/v1/messages` on the
+same port as the OpenAI endpoints. Any tool that uses the official Anthropic
+SDK (Claude Code, custom Anthropic-SDK clients, OpenCode, etc.) can be
+re-pointed at the local server via two environment variables.
+
+### 9.1 Recommended server config for Claude Code
+
+Claude Code does **long-context** work (multi-file reads, long conversations,
+big diffs). For this workload use `--profile sustained` despite its slower
+decode — the prefill fast path matters more for long inputs than burst tok/s.
+
+```bash
+mtplx serve \
+  --model Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed \
+  --profile sustained \
+  --host 127.0.0.1 --port 6767 \
+  --reasoning on \
+  --no-stats-footer
+```
+
+### 9.2 Point Claude Code (or any Anthropic SDK client) at it
+
+In the terminal you intend to run Claude Code from:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:6767
+export ANTHROPIC_API_KEY=dummy   # loopback skips auth, but SDK requires non-empty
+claude                            # now talking to local Qwen, not Anthropic cloud
+```
+
+`ANTHROPIC_BASE_URL` is an official Anthropic SDK environment variable —
+every tool built on the Anthropic SDK respects it. This works for Claude
+Code, the `anthropic` Python package, the TS SDK, etc.
+
+**⚠️ Do NOT export these globally** (i.e. don't put them in `~/.zshrc`)
+unless you are sure you want *every* Anthropic SDK call on your machine
+to go to local Qwen 27B. Capability gap is large: cloud Claude (Opus 4.7,
+Sonnet 4.6) vs local Qwen 27B differs by ~5-10× on tool calling, long-context
+reasoning, and code quality. Keep this in a dedicated terminal session.
+
+### 9.3 Verify the Anthropic endpoint
+
+```bash
+curl http://127.0.0.1:6767/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-api-key: dummy" \
+  -d '{
+    "model": "mtplx-qwen36-27b-optimized-speed",
+    "max_tokens": 50,
+    "messages": [{"role":"user","content":"Reply with exactly: PONG"}]
+  }'
+```
+
+Expected response shape: `{"id":"msg_…", "type":"message", "role":"assistant",
+"content":[{"type":"text","text":"…"}], "stop_reason":"…", "usage":{"input_tokens":N,"output_tokens":N}}`.
+
+### 9.4 Profile choice per workload
+
+| Workload | Profile | Reasoning | Notes |
+| --- | --- | --- | --- |
+| Browser chat, single-turn Q&A | `performance-cold` | on/off | Short context, max burst speed |
+| **Claude Code, code editing** | **`sustained`** | **on** | Long context > 8K, stable prefill |
+| RAG over large docs | `sustained` | off | Long prompt, don't waste tokens on thinking |
+| Math / multi-step reasoning | `performance-cold` | on | Short prompt, value thinking quality |
+
+If you need two workloads in parallel, run two server instances on different
+ports (e.g. 6767 sustained for Claude Code, 6768 performance-cold for chat).
+
+---
+
+## 10. Quick reference
 
 ```bash
 # Install
@@ -324,13 +402,23 @@ pipx install mtplx
 # Download Qwen 27B (~16.4 GB)
 mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
 
-# Start server (daily driver)
+# Start server — daily driver (chat / single-turn)
 mtplx serve \
   --model Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed \
   --profile performance-cold \
   --host 127.0.0.1 --port 6767 \
   --reasoning on --no-stats-footer --open-browser
 
-# Use chat UI → http://127.0.0.1:6767/
-# Call API   → http://127.0.0.1:6767/v1/chat/completions
+# Start server — Claude Code backend (long-context coding)
+mtplx serve \
+  --model Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed \
+  --profile sustained \
+  --host 127.0.0.1 --port 6767 \
+  --reasoning on --no-stats-footer
+
+# Use chat UI       → http://127.0.0.1:6767/
+# OpenAI API        → http://127.0.0.1:6767/v1/chat/completions
+# Anthropic API     → http://127.0.0.1:6767/v1/messages
+# Claude Code       → ANTHROPIC_BASE_URL=http://127.0.0.1:6767 \
+#                     ANTHROPIC_API_KEY=dummy claude
 ```
