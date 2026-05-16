@@ -348,13 +348,31 @@ In the terminal you intend to run Claude Code from:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:6767
-export ANTHROPIC_API_KEY=dummy   # loopback skips auth, but SDK requires non-empty
-claude                            # now talking to local Qwen, not Anthropic cloud
+export ANTHROPIC_API_KEY=dummy                                    # loopback skips auth, SDK needs non-empty
+export ANTHROPIC_MODEL=mtplx-qwen36-27b-optimized-speed           # override default claude-* model name
+export ANTHROPIC_SMALL_FAST_MODEL=mtplx-qwen36-27b-optimized-speed # same for haiku-class background tasks
+claude                                                             # now talking to local Qwen, not Anthropic cloud
 ```
 
-`ANTHROPIC_BASE_URL` is an official Anthropic SDK environment variable —
-every tool built on the Anthropic SDK respects it. This works for Claude
-Code, the `anthropic` Python package, the TS SDK, etc.
+Why all four env vars are required:
+
+- **`ANTHROPIC_BASE_URL`** — official Anthropic SDK redirect; every tool
+  built on the Anthropic SDK respects it (Claude Code, `anthropic` Python
+  package, TS SDK, etc).
+- **`ANTHROPIC_API_KEY`** — loopback `--host 127.0.0.1` skips actual auth,
+  but the SDK refuses to start with an empty key. Any non-empty placeholder
+  works.
+- **`ANTHROPIC_MODEL`** — Claude Code's default is `claude-opus-*` /
+  `claude-sonnet-*`, which the MTPLX server's `/v1/models` does not list.
+  Without this override Claude Code fails with `model missing` during
+  startup. Set it to the model id MTPLX serves (`mtplx-qwen36-27b-optimized-speed`).
+- **`ANTHROPIC_SMALL_FAST_MODEL`** — Claude Code internally runs background
+  tasks (conversation compaction, quick tool routing) against a "small fast"
+  model that defaults to a `claude-haiku-*` id. Same problem; point it at
+  the same MTPLX model since you only have one local model loaded.
+
+`mtplx-qwen36-27b-optimized-speed` is the **server's** model id, derived from
+the HF model name. Confirm with: `curl -s http://127.0.0.1:6767/v1/models`.
 
 **⚠️ Do NOT export these globally** (i.e. don't put them in `~/.zshrc`)
 unless you are sure you want *every* Anthropic SDK call on your machine
@@ -420,5 +438,8 @@ mtplx serve \
 # OpenAI API        → http://127.0.0.1:6767/v1/chat/completions
 # Anthropic API     → http://127.0.0.1:6767/v1/messages
 # Claude Code       → ANTHROPIC_BASE_URL=http://127.0.0.1:6767 \
-#                     ANTHROPIC_API_KEY=dummy claude
+#                     ANTHROPIC_API_KEY=dummy \
+#                     ANTHROPIC_MODEL=mtplx-qwen36-27b-optimized-speed \
+#                     ANTHROPIC_SMALL_FAST_MODEL=mtplx-qwen36-27b-optimized-speed \
+#                     claude
 ```
