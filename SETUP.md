@@ -397,7 +397,95 @@ curl http://127.0.0.1:6767/v1/messages \
 Expected response shape: `{"id":"msg_…", "type":"message", "role":"assistant",
 "content":[{"type":"text","text":"…"}], "stop_reason":"…", "usage":{"input_tokens":N,"output_tokens":N}}`.
 
-### 9.4 Profile choice per workload
+### 9.4 Real-world test result: Claude Code + local Qwen 27B is too slow
+
+Test run 2026-05-16 on this exact hardware/software stack
+(MBA M4, 32 GB, MTPLX 0.3.6, Qwen3.6-27B-MTPLX-Optimized-Speed, sustained
+profile, `--reasoning on`):
+
+- **Prompt**: a single `hi`
+- **Response**: `嗨！有什么需要帮忙的？` (one Mandarin line)
+- **Time**: **4 minutes 28 seconds** (server log `elapsed_s: 268.029911`)
+
+Why so slow even for a one-word prompt — three compounding factors:
+
+1. **Claude Code injects a massive system prompt.** Tool definitions,
+   environment metadata, and the user's global `~/.claude/CLAUDE.md`
+   are all sent on every turn. Estimated 15-25K tokens of prefill on
+   the very first message. On M4 base (~120 GB/s bandwidth) prefilling
+   ~20K tokens of a 16.4 GB model takes 3-4 minutes alone.
+2. **Reasoning mode adds thinking tokens.** With `--reasoning on`, Qwen
+   produces several hundred to thousand `<think>…</think>` tokens before
+   the first user-visible output. Each token is ~0.1 s of decode in
+   sustained mode.
+3. **No streaming feedback during prefill.** During the 3-4 minute
+   prefill phase the server emits `mtplx_stream_silence` events with
+   `completion_tokens: 0`. Claude Code shows a `Wrangling…` spinner
+   the whole time — looks like a hang but the system is working.
+
+#### Thinking-block leak
+
+Claude Code's UI rendered Qwen's *entire* thinking block as visible
+assistant content, e.g. lines like
+"Per my global config, I should reply in Mandarin..." appeared in the
+chat transcript before the actual answer. Root cause:
+
+| Layer | What it does | What it expects |
+| --- | --- | --- |
+| Anthropic protocol | Has a dedicated `thinking_block` content type Claude Code knows to fold away | `{"type":"thinking", "thinking":"…"}` blocks |
+| MTPLX 0.3.6 server | Streams Qwen's raw output as plain `{"type":"text","text":"…"}` | (no thinking-block translation) |
+| Qwen 3.6 model | Emits thinking inline using `<think>…</think>` text markers | (model-level convention) |
+
+Three protocols, no agreement on where the thinking boundary is — so the
+client renders it as content. There is no per-request fix in 0.3.6; mitigate
+by launching server with `--reasoning off` for any Claude Code session.
+
+#### Protocol mismatch layers
+
+Beyond the thinking leak, three more compatibility gaps make
+Claude Code + local Qwen significantly weaker than Claude Code + cloud:
+
+1. **Tool calls** — Claude Code expects strict Anthropic tool_use JSON
+   blocks. Qwen 27B has to be prompt-engineered into producing them;
+   accuracy and reliability drop vs cloud Claude's native training.
+2. **Long-context attention** — Claude Code workflows commonly cross
+   50K+ tokens (multi-file reads, long histories). Qwen 27B's
+   effective working context degrades well before its nominal 262K
+   limit on M4 base due to prefill cost.
+3. **Background "small fast" tasks** — Claude Code's compaction and
+   tool-routing default to a Haiku-class model. Pointing both
+   `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` at the same
+   27B model means even tiny housekeeping calls pay full 27B latency.
+
+#### Verdict
+
+Claude Code + local Qwen 27B on M4 base is **suitable only for**:
+
+- Curiosity / capability-gap exploration (one-shot Q&A to compare against
+  cloud Claude responses).
+- Single-turn chat-style queries with short context (use the
+  built-in chat UI at `http://127.0.0.1:6767/` instead of Claude Code —
+  it's the same backend without the heavyweight system prompt).
+
+**Not suitable for**:
+
+- Real coding work (multi-file edits, debugging, refactoring).
+  Each turn at 1-4 minutes makes the loop unusable.
+- Agentic tasks involving tool calls or planning.
+
+#### What to use instead
+
+- **Lighter coding agent**: `aider` or `continue.dev` send much smaller
+  system prompts than Claude Code (~1-3K tokens vs 20K+), so prefill
+  cost drops 5-10×.
+- **Smaller model**: a 7B-14B model on M4 base prefills 2-3× faster
+  than 27B, and the lower quality is often fine for code completion-style
+  workflows.
+- **Different hardware**: M4 Pro or Max with 2-4× the memory bandwidth
+  brings prefill of 20K tokens down to under a minute, which makes
+  Claude Code + local LLM start to be usable.
+
+### 9.5 Profile choice per workload
 
 | Workload | Profile | Reasoning | Notes |
 | --- | --- | --- | --- |
